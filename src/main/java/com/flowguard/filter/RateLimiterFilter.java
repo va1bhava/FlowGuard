@@ -1,5 +1,5 @@
 package com.flowguard.filter;
-
+import com.flowguard.circuitBreaker.circuitBreakerService;
 import com.flowguard.dto.ApiKeyResolutionResult;
 import com.flowguard.exception.InvalidApiKeyException;
 import com.flowguard.resolver.KeyResolver;
@@ -25,7 +25,7 @@ import java.io.IOException;
 @RequiredArgsConstructor
 public class RateLimiterFilter extends OncePerRequestFilter {
 
-
+    private final circuitBreakerService circuitBreakerService;
     private final ProxyService proxyService;
     private final RateLimiterStrategy strategy;
     private final KeyResolver keyResolver;
@@ -92,10 +92,32 @@ public class RateLimiterFilter extends OncePerRequestFilter {
         // So all this below code will hit the upstream URL of the tenant and return the response
         // it will never hit our controllers
 
+        String tenantId = resolved.getTenantId().toString();
+        String backendHost = resolved.getUpstreamUrl();
+
+        if (!circuitBreakerService.allowRequests(tenantId, backendHost)) {
+            log.warn("Circuit OPEN for tenant {} backend {} — short-circuiting", tenantId, backendHost);
+            response.setStatus(503);
+            response.setContentType("application/json");
+            response.getWriter().write("""
+                    {
+                      "error": "Service Unavailable",
+                      "message": "Backend is currently unavailable (circuit open)."
+                    }
+                    """);
+            return;
+        }
+
         String requestBody = request.getReader().lines()
                 .collect(java.util.stream.Collectors.joining(System.lineSeparator()));
 
         ResponseEntity<byte[]> proxied = proxyService.forward(request, resolved.getUpstreamUrl(), requestBody);
+
+        if (proxied.getStatusCode().is5xxServerError()) {
+            circuitBreakerService.recordFailure(tenantId, backendHost);
+        } else {
+            circuitBreakerService.recordSucess(tenantId, backendHost);
+        }
 
         response.setStatus(proxied.getStatusCode().value());
         if (proxied.getHeaders().getContentType() != null) {
