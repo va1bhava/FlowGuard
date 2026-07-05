@@ -73,6 +73,7 @@ public class KeyResolver {
     public ApiKeyResolutionResult buildResult(ApiKey foundedKey){
         boolean unlimited = foundedKey.getTenant().getPlan().isUnlimited();
         return ApiKeyResolutionResult.builder().tenantId(foundedKey.getTenant().getId())
+                .apiKeyId(foundedKey.getId())
                 .rateLimitKey("rl:tenant:" + foundedKey.getTenant().getId()).unlimited(unlimited)
                 .requestsPerMinute(foundedKey.getTenant().getPlan().getRequestsPerMinute())
                 .upstreamUrl(foundedKey.getTenant().getUpstreamUrl()).build();

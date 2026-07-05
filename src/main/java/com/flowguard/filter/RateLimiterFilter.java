@@ -4,6 +4,7 @@ import com.flowguard.dto.ApiKeyResolutionResult;
 import com.flowguard.exception.InvalidApiKeyException;
 import com.flowguard.resolver.KeyResolver;
 import com.flowguard.service.ProxyService;
+import com.flowguard.service.RequestLogService;
 import com.flowguard.strategy.RateLimiterStrategy;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -29,12 +30,18 @@ public class RateLimiterFilter extends OncePerRequestFilter {
     private final ProxyService proxyService;
     private final RateLimiterStrategy strategy;
     private final KeyResolver keyResolver;
+    private final RequestLogService requestLogService;
 
     @Override
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain filterChain)
             throws ServletException, IOException {
+
+        long startTime = System.currentTimeMillis();
+        String clientIp = resolveClientIp(request);
+        String method = request.getMethod();
+        String path = request.getRequestURI();
 
         ApiKeyResolutionResult resolved;
         try {
@@ -49,11 +56,13 @@ public class RateLimiterFilter extends OncePerRequestFilter {
                       "message": "%s"
                     }
                     """.formatted(e.getMessage()));
+            // No tenant identified — nothing to attribute this to in request_logs.
             return;
         }
 
         if (resolved.isUnlimited()) {
             filterChain.doFilter(request, response);
+            logIfTenantKnown(resolved, clientIp, method, path, response.getStatus(), startTime, false, false);
             return;
         }
 
@@ -80,12 +89,14 @@ public class RateLimiterFilter extends OncePerRequestFilter {
                       "retryAfterSeconds": %d
                     }
                     """.formatted(retryAfter));
+            logIfTenantKnown(resolved, clientIp, method, path, 429, startTime, true, false);
             return;
         }
 
         if (resolved.getUpstreamUrl() == null) {
             // No upstream configured — this is a raw IP-based/no-key request, let it hit our own controllers
             filterChain.doFilter(request, response);
+            logIfTenantKnown(resolved, clientIp, method, path, response.getStatus(), startTime, false, false);
             return;
         }
 
@@ -105,6 +116,7 @@ public class RateLimiterFilter extends OncePerRequestFilter {
                       "message": "Backend is currently unavailable (circuit open)."
                     }
                     """);
+            logIfTenantKnown(resolved, clientIp, method, path, 503, startTime, false, false);
             return;
         }
 
@@ -126,5 +138,26 @@ public class RateLimiterFilter extends OncePerRequestFilter {
         if (proxied.getBody() != null) {
             response.getOutputStream().write(proxied.getBody());
         }
+
+        logIfTenantKnown(resolved, clientIp, method, path, proxied.getStatusCode().value(),
+                startTime, false, false);
+    }
+
+    private void logIfTenantKnown(ApiKeyResolutionResult resolved, String clientIp, String method,
+                                  String path, int statusCode, long startTime,
+                                  boolean wasRateLimited, boolean wasIpBlocked) {
+        // IP-based fallback requests have no tenant — request_logs.tenant_id is non-null,
+        // so we simply don't persist those (they're not billable/attributable traffic).
+        if (resolved.getTenantId() == null) {
+            return;
+        }
+        long responseTimeMs = System.currentTimeMillis() - startTime;
+        requestLogService.log(resolved.getTenantId(), resolved.getApiKeyId(), clientIp, method,
+                path, statusCode, responseTimeMs, wasRateLimited, wasIpBlocked);
+    }
+
+    private String resolveClientIp(HttpServletRequest request) {
+        String forwardedFor = request.getHeader("X-Forwarded-For");
+        return (forwardedFor != null && !forwardedFor.isBlank()) ? forwardedFor : request.getRemoteAddr();
     }
 }

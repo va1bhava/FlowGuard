@@ -8,6 +8,7 @@ import java.util.UUID;
 @Builder
 public class ApiKeyResolutionResult {
     private UUID tenantId;
+    private UUID apiKeyId;
     private String rateLimitKey;
     private int requestsPerMinute;
     private boolean unlimited;
