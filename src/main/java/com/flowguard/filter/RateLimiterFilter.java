@@ -3,6 +3,7 @@ import com.flowguard.circuitBreaker.circuitBreakerService;
 import com.flowguard.dto.ApiKeyResolutionResult;
 import com.flowguard.exception.InvalidApiKeyException;
 import com.flowguard.resolver.KeyResolver;
+import com.flowguard.service.IpRuleService;
 import com.flowguard.service.ProxyService;
 import com.flowguard.service.RequestLogService;
 import com.flowguard.strategy.RateLimiterStrategy;
@@ -31,7 +32,7 @@ public class RateLimiterFilter extends OncePerRequestFilter {
     private final RateLimiterStrategy strategy;
     private final KeyResolver keyResolver;
     private final RequestLogService requestLogService;
-
+    private final IpRuleService ipRuleService;
     @Override
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
@@ -59,7 +60,19 @@ public class RateLimiterFilter extends OncePerRequestFilter {
             // No tenant identified — nothing to attribute this to in request_logs.
             return;
         }
-
+        if (resolved.getTenantId() != null && ipRuleService.isBlocked(resolved.getTenantId(), clientIp)) {
+            log.warn("Blocked IP {} for tenant {}", clientIp, resolved.getTenantId());
+            response.setStatus(403);
+            response.setContentType("application/json");
+            response.getWriter().write("""
+                {
+                  "error": "Forbidden",
+                  "message": "Your IP address is not permitted to access this resource."
+                }
+                """);
+            logIfTenantKnown(resolved, clientIp, method, path, 403, startTime, false, true);
+            return;
+        }
         if (resolved.isUnlimited()) {
             filterChain.doFilter(request, response);
             logIfTenantKnown(resolved, clientIp, method, path, response.getStatus(), startTime, false, false);
