@@ -38,9 +38,14 @@ public class RateLimiterFilter extends OncePerRequestFilter {
                                     HttpServletResponse response,
                                     FilterChain filterChain)
             throws ServletException, IOException {
-
+        String requestPath = request.getRequestURI();
+        if (requestPath.startsWith("/api/tenants") || requestPath.startsWith("/debug") || requestPath.startsWith("/flaky")) {
+            filterChain.doFilter(request, response);
+            return;
+        }
         long startTime = System.currentTimeMillis();
         String clientIp = resolveClientIp(request);
+        log.info("Resolved client IP: {}", clientIp);
         String method = request.getMethod();
         String path = request.getRequestURI();
 
@@ -171,6 +176,12 @@ public class RateLimiterFilter extends OncePerRequestFilter {
 
     private String resolveClientIp(HttpServletRequest request) {
         String forwardedFor = request.getHeader("X-Forwarded-For");
-        return (forwardedFor != null && !forwardedFor.isBlank()) ? forwardedFor : request.getRemoteAddr();
+        String ip = (forwardedFor != null && !forwardedFor.isBlank()) ? forwardedFor : request.getRemoteAddr();
+
+        // Normalize IPv6 loopback to IPv4 loopback — same machine, same rule should apply.
+        if ("0:0:0:0:0:0:0:1".equals(ip) || "::1".equals(ip)) {
+            return "127.0.0.1";
+        }
+        return ip;
     }
 }

@@ -99,7 +99,8 @@ public class IpRuleService {
     }
 
     private void invalidateCache(UUID tenantId) {
-        stringRedisTemplate.delete(CACHE_PREFIX + tenantId);
+        boolean deleted = Boolean.TRUE.equals(stringRedisTemplate.delete(CACHE_PREFIX + tenantId));
+        log.info("Cache invalidation for tenant {}: {}", tenantId, deleted ? "cleared" : "no cache existed");
     }
 
     // Deliberately NOT the IpRule entity — caching the entity would serialize

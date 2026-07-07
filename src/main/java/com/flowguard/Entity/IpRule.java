@@ -18,8 +18,7 @@ public class IpRule {
     private Tenant tenant;
 
     // PostgreSQL INET type supports subnets like 192.168.1.0/24
-    @Column(name = "ip_address", nullable = false,
-            columnDefinition = "inet")
+    @Column(name = "ip_address", nullable = false, length = 45)
     private String ipAddress;
 
     @Enumerated(EnumType.STRING)
