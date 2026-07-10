@@ -3,9 +3,7 @@ import com.flowguard.circuitBreaker.circuitBreakerService;
 import com.flowguard.dto.ApiKeyResolutionResult;
 import com.flowguard.exception.InvalidApiKeyException;
 import com.flowguard.resolver.KeyResolver;
-import com.flowguard.service.IpRuleService;
-import com.flowguard.service.ProxyService;
-import com.flowguard.service.RequestLogService;
+import com.flowguard.service.*;
 import com.flowguard.strategy.RateLimiterStrategy;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -21,6 +19,8 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
+import com.flowguard.dto.WebhookEvent;
+import java.util.Map;
 
 @Slf4j
 @Component
@@ -33,6 +33,8 @@ public class RateLimiterFilter extends OncePerRequestFilter {
     private final KeyResolver keyResolver;
     private final RequestLogService requestLogService;
     private final IpRuleService ipRuleService;
+    private final AbuseDetectionService abuseDetectionService;
+    private final WebhookService webhookService;
     @Override
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
@@ -108,6 +110,35 @@ public class RateLimiterFilter extends OncePerRequestFilter {
                     }
                     """.formatted(retryAfter));
             logIfTenantKnown(resolved, clientIp, method, path, 429, startTime, true, false);
+            return;
+        }if (!allowed) {
+            long retryAfter = strategy.retryAfterSeconds(key, limit);
+
+            log.warn("Rate limit exceeded for key: {}", key);
+
+            response.setStatus(429);
+            response.setHeader("Retry-After", String.valueOf(retryAfter));
+            response.setContentType("application/json");
+            response.getWriter().write("""
+                    {
+                      "error": "Too Many Requests",
+                      "message": "Rate limit exceeded. Please slow down.",
+                      "retryAfterSeconds": %d
+                    }
+                    """.formatted(retryAfter));
+            logIfTenantKnown(resolved, clientIp, method, path, 429, startTime, true, false);
+
+            boolean isAbuseSpike = resolved.getTenantId() != null
+                    && abuseDetectionService.recordRejectionAndCheckThreshold(resolved.getTenantId());
+            if (isAbuseSpike) {
+                webhookService.dispatch(resolved.getTenantId(), WebhookEvent.RATE_LIMIT_BREACH, Map.of(
+                        "path", path,
+                        "method", method,
+                        "windowSeconds", 60,
+                        "threshold", 100,
+                        "reason", "429 rate exceeded threshold — possible abuse/DDoS"
+                ));
+            }
             return;
         }
 

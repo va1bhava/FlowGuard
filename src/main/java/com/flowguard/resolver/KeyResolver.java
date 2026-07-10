@@ -3,8 +3,10 @@ package com.flowguard.resolver;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.flowguard.Entity.ApiKey;
 import com.flowguard.dto.ApiKeyResolutionResult;
+import com.flowguard.dto.WebhookEvent;
 import com.flowguard.exception.InvalidApiKeyException;
 import com.flowguard.repository.ApiKeyRepository;
+import com.flowguard.service.WebhookService;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -19,6 +21,7 @@ import java.security.MessageDigest;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HexFormat;
+import java.util.Map;
 
 @Slf4j
 @RequiredArgsConstructor
@@ -34,6 +37,7 @@ public class KeyResolver {
     private final StringRedisTemplate stringRedisTemplate;
 
     private final ApiKeyRepository apiKeyRepository;
+    private final WebhookService webhookService;
 
     public ApiKeyResolutionResult resolve(HttpServletRequest request) {
 
@@ -62,6 +66,10 @@ public class KeyResolver {
             throw new InvalidApiKeyException("Api key is inactive");
         }
         if(foundKey.getExpiresAt()!=null&&foundKey.getExpiresAt().isBefore(Instant.now())){
+            webhookService.dispatch(foundKey.getTenant().getId(), WebhookEvent.KEY_EXPIRED, Map.of(
+                    "apiKeyId", foundKey.getId().toString(),
+                    "keyPrefix", foundKey.getKeyPrefix()
+            ));
             throw new InvalidApiKeyException("Api key expired");
         }
 

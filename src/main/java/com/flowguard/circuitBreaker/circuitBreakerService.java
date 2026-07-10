@@ -1,5 +1,8 @@
 package com.flowguard.circuitBreaker;
 
+import com.flowguard.dto.WebhookEvent;
+import com.flowguard.service.WebhookService;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -7,8 +10,11 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 
 import java.util.Collections;
+import java.util.UUID;
+import java.util.Map;
 
 @Service
+@Slf4j
 public class circuitBreakerService {
     private static final int FAILURE_THRESHOLD = 5;
     private static final long COOLDOWN_MS = 30_000L;
@@ -19,10 +25,11 @@ public class circuitBreakerService {
     private final DefaultRedisScript<String> allowRequestScript;
     private final DefaultRedisScript<String> recordSuccessScript;
     private final DefaultRedisScript<String> recordFailureScript;
-
+    private final WebhookService webhookService;
     @Autowired
-    public circuitBreakerService(StringRedisTemplate redisTemplate) {
+    public circuitBreakerService(StringRedisTemplate redisTemplate, WebhookService webhookService) {
         this.redisTemplate = redisTemplate;
+        this.webhookService = webhookService;
 
         this.allowRequestScript = new DefaultRedisScript<>();
         this.allowRequestScript.setLocation(new ClassPathResource("lua/allow_request.lua"));
@@ -65,12 +72,22 @@ public class circuitBreakerService {
     public void recordFailure(String tenantId, String backendHost) {
         String key = buildKey(tenantId, backendHost);
         long now = System.currentTimeMillis();
-        redisTemplate.execute(
+        String result = redisTemplate.execute(
                 recordFailureScript,
                 Collections.singletonList(key),
                 String.valueOf(now),
                 String.valueOf(FAILURE_THRESHOLD)
         );
+
+        if ("OPEN".equals(result)) {
+            try {
+                webhookService.dispatch(UUID.fromString(tenantId), WebhookEvent.CIRCUIT_OPEN, Map.of(
+                        "backendHost", backendHost
+                ));
+            } catch (IllegalArgumentException e) {
+                log.warn("Could not parse tenantId '{}' for CIRCUIT_OPEN webhook dispatch", tenantId);
+            }
+        }
     }
     public String getState(String tenantId, String backendHost) {
         String key = buildKey(tenantId, backendHost);
