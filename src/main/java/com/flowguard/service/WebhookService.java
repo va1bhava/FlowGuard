@@ -5,6 +5,7 @@ import com.flowguard.Entity.Tenant;
 import com.flowguard.Entity.WebhookConfig;
 import com.flowguard.Entity.WebhookDelivery;
 import com.flowguard.dto.CreateWebhookRequest;
+import com.flowguard.dto.WebhookDeliveryMessage;
 import com.flowguard.dto.WebhookEvent;
 import com.flowguard.repository.TenantRepository;
 import com.flowguard.repository.WebhookConfigRepository;
@@ -40,24 +41,15 @@ public class WebhookService {
     private static final String HMAC_ALGO = "HmacSHA256";
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
-    // Threads are cheap (virtual), outbound connections/network are not.
-    // This caps how many webhook deliveries can be in flight at once,
-    // regardless of how many dispatch() calls come in simultaneously.
-    private static final int MAX_CONCURRENT_DELIVERIES = 20;
-    private final Semaphore deliveryLimiter = new Semaphore(MAX_CONCURRENT_DELIVERIES);
-
     // ~5s, 15s, 45s, 2.25m, 6.75m, 20m — then the delivery is marked DEAD.
     private static final int MAX_ATTEMPTS = 6;
 
+    private WebhookPublisher webhookPublisher;
     private final WebhookConfigRepository webhookConfigRepository;
     private final WebhookDeliveryRepository webhookDeliveryRepository;
     private final TenantRepository tenantRepository;
     private final WebhookUrlValidator webhookUrlValidator;
     private final ObjectMapper objectMapper;
-
-    // Dedicated, timeout-bounded client — NOT the shared RestTemplate used by
-    // ProxyService, so a slow customer endpoint can't affect proxying.
-    private final @Qualifier("webhookRestTemplate") RestTemplate restTemplate;
 
     public WebhookConfig create(UUID tenantId, CreateWebhookRequest request) {
         // Blocks localhost/private-IP/link-local targets (incl. cloud metadata) —
@@ -118,6 +110,7 @@ public class WebhookService {
     // Builds the payload once, persists it as a delivery record, then makes the
     // first attempt. Persisting first means a delivery is never silently lost —
     // if this JVM dies mid-attempt, the retry scheduler will still pick it up.
+    // enqueue() — only change is the last line:
     private void enqueue(WebhookConfig config, String eventName, UUID tenantId, Map<String, Object> data) {
         String body;
         try {
@@ -140,68 +133,17 @@ public class WebhookService {
                 .payload(body)
                 .nextAttemptAt(Instant.now())
                 .build();
-        webhookDeliveryRepository.save(delivery);
+        delivery = webhookDeliveryRepository.save(delivery); // need the generated id below
 
-        attemptDelivery(delivery);
-    }
-
-    // Called for the first attempt (from enqueue) AND by WebhookRetryScheduler
-    // for every subsequent retry. Public so the scheduler can call it directly.
-    public void attemptDelivery(WebhookDelivery delivery) {
-        try {
-            // Block (park the virtual thread — cheap) until a delivery slot
-            // frees up, instead of letting unlimited concurrent HTTP calls fire.
-            deliveryLimiter.acquire();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return;
-        }
-
-        try {
-            String signature = sign(delivery.getPayload(), delivery.getWebhookConfig().getSecret());
-
-            HttpHeaders headers = new HttpHeaders();
-            headers.set("Content-Type", "application/json");
-            headers.set("X-FlowGuard-Event", delivery.getEventName());
-            headers.set("X-FlowGuard-Signature", signature);
-
-            restTemplate.postForEntity(delivery.getWebhookConfig().getUrl(),
-                    new HttpEntity<>(delivery.getPayload(), headers), String.class);
-
-            delivery.setStatus("DELIVERED");
-            webhookDeliveryRepository.save(delivery);
-
-        } catch (Exception e) {
-            int attempts = delivery.getAttemptCount() + 1;
-            delivery.setAttemptCount(attempts);
-            delivery.setLastError(e.getMessage());
-
-            if (attempts >= MAX_ATTEMPTS) {
-                // Dead-letter — surfaced later via a "failed deliveries" endpoint for the tenant.
-                delivery.setStatus("DEAD");
-                log.error("Webhook delivery DEAD for tenant {} url {} after {} attempts",
-                        delivery.getTenantId(), delivery.getWebhookConfig().getUrl(), attempts);
-            } else {
-                long backoffSeconds = (long) (5 * Math.pow(3, attempts - 1));
-                delivery.setNextAttemptAt(Instant.now().plusSeconds(backoffSeconds));
-                log.warn("Webhook delivery failed (attempt {}/{}) for tenant {}, retrying in {}s: {}",
-                        attempts, MAX_ATTEMPTS, delivery.getTenantId(), backoffSeconds, e.getMessage());
-            }
-            webhookDeliveryRepository.save(delivery);
-        } finally {
-            deliveryLimiter.release();
-        }
-    }
-
-    private String sign(String payload, String secret) {
-        try {
-            Mac mac = Mac.getInstance(HMAC_ALGO);
-            mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), HMAC_ALGO));
-            byte[] hash = mac.doFinal(payload.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(hash);
-        } catch (Exception e) {
-            throw new RuntimeException("Could not sign webhook payload", e);
-        }
+        webhookPublisher.publish(WebhookDeliveryMessage.builder()
+                .deliveryId(delivery.getId())
+                .tenantId(tenantId)
+                .url(config.getUrl())
+                .secret(config.getSecret())
+                .eventName(eventName)
+                .payload(body)
+                .attemptCount(0)
+                .build());
     }
 
     private String generateSecret() {
