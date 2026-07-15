@@ -111,37 +111,7 @@ public class RateLimiterFilter extends OncePerRequestFilter {
                     """.formatted(retryAfter));
             logIfTenantKnown(resolved, clientIp, method, path, 429, startTime, true, false);
             return;
-        }if (!allowed) {
-            long retryAfter = strategy.retryAfterSeconds(key, limit);
-
-            log.warn("Rate limit exceeded for key: {}", key);
-
-            response.setStatus(429);
-            response.setHeader("Retry-After", String.valueOf(retryAfter));
-            response.setContentType("application/json");
-            response.getWriter().write("""
-                    {
-                      "error": "Too Many Requests",
-                      "message": "Rate limit exceeded. Please slow down.",
-                      "retryAfterSeconds": %d
-                    }
-                    """.formatted(retryAfter));
-            logIfTenantKnown(resolved, clientIp, method, path, 429, startTime, true, false);
-
-            boolean isAbuseSpike = resolved.getTenantId() != null
-                    && abuseDetectionService.recordRejectionAndCheckThreshold(resolved.getTenantId());
-            if (isAbuseSpike) {
-                webhookService.dispatch(resolved.getTenantId(), WebhookEvent.RATE_LIMIT_BREACH, Map.of(
-                        "path", path,
-                        "method", method,
-                        "windowSeconds", 60,
-                        "threshold", 100,
-                        "reason", "429 rate exceeded threshold — possible abuse/DDoS"
-                ));
-            }
-            return;
         }
-
         if (resolved.getUpstreamUrl() == null) {
             // No upstream configured — this is a raw IP-based/no-key request, let it hit our own controllers
             filterChain.doFilter(request, response);

@@ -21,7 +21,7 @@ public class RabbitConfig {
 
     public static final String DLQ = "webhook.dlq";
     public static final String DLQ_ROUTING_KEY = "webhook.dead";
-
+    public static final String DLX_EXCHANGE = "webhook.dlx.exchange";
     // ===== Main path: event fires -> published here -> consumer tries delivery =====
 
     @Bean
@@ -70,7 +70,7 @@ public class RabbitConfig {
 
     @Bean
     public DirectExchange dlxExchange() {
-        return new DirectExchange(DLQ_ROUTING_KEY + ".exchange");
+        return new DirectExchange(DLX_EXCHANGE);
     }
 
     @Bean
