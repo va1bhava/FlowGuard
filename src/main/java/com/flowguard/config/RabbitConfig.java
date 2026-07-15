@@ -1,11 +1,14 @@
 package com.flowguard.config;
 
 import org.springframework.amqp.core.*;
+import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFactory;
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.support.converter.Jackson2JsonMessageConverter;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+
+import java.util.concurrent.Executors;
 
 @Configuration
 public class RabbitConfig {
@@ -95,5 +98,29 @@ public class RabbitConfig {
         RabbitTemplate template = new RabbitTemplate(connectionFactory);
         template.setMessageConverter(jsonMessageConverter());
         return template;
+    }
+
+    // ===== Virtual-thread-backed listener container =====
+    // Each incoming delivery message is handed off to a fresh virtual thread instead
+    // of one of the fixed platform threads from spring.rabbitmq.listener.simple.concurrency.
+    // Since a webhook delivery is mostly blocked on HTTP I/O (the POST to the tenant's
+    // endpoint), virtual threads let us scale consumption far beyond a handful of
+    // platform threads without tuning concurrency/max-concurrency by hand.
+    // NOTE: @RabbitListener on WebhookConsumer must reference this factory explicitly,
+    // e.g. @RabbitListener(queues = RabbitConfig.DELIVERY_QUEUE, containerFactory = "virtualThreadRabbitListenerContainerFactory")
+    @Bean
+    public SimpleRabbitListenerContainerFactory virtualThreadRabbitListenerContainerFactory(
+            ConnectionFactory connectionFactory) {
+        SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
+        factory.setConnectionFactory(connectionFactory);
+        factory.setMessageConverter(jsonMessageConverter());
+        factory.setTaskExecutor(Executors.newVirtualThreadPerTaskExecutor());
+        // Concurrency here means "how many consumer loops pull from the queue", each
+        // loop dispatching its message handling onto the virtual-thread executor above.
+        // A handful is enough — the real parallelism now comes from the executor, not this.
+        factory.setConcurrentConsumers(10);
+        factory.setMaxConcurrentConsumers(50);
+        factory.setPrefetchCount(10);
+        return factory;
     }
 }
