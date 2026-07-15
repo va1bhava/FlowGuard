@@ -41,7 +41,8 @@ public class RateLimiterFilter extends OncePerRequestFilter {
                                     FilterChain filterChain)
             throws ServletException, IOException {
         String requestPath = request.getRequestURI();
-        if (requestPath.startsWith("/api/tenants") || requestPath.startsWith("/debug") || requestPath.startsWith("/flaky")) {
+        if (requestPath.startsWith("/api/tenants") || requestPath.startsWith("/debug") || requestPath.startsWith("/flaky")
+                || requestPath.equals("/ping") || requestPath.equals("/health")) {
             filterChain.doFilter(request, response);
             return;
         }
@@ -98,6 +99,14 @@ public class RateLimiterFilter extends OncePerRequestFilter {
             long retryAfter = strategy.retryAfterSeconds(key, limit);
 
             log.warn("Rate limit exceeded for key: {}", key);
+
+            if (resolved.getTenantId() != null
+                    && abuseDetectionService.recordRejectionAndCheckThreshold(resolved.getTenantId())) {
+                webhookService.dispatch(resolved.getTenantId(), WebhookEvent.RATE_LIMIT_BREACH, Map.of(
+                        "clientIp", clientIp,
+                        "path", path
+                ));
+            }
 
             response.setStatus(429);
             response.setHeader("Retry-After", String.valueOf(retryAfter));

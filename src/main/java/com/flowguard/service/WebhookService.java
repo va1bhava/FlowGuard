@@ -44,7 +44,7 @@ public class WebhookService {
     // ~5s, 15s, 45s, 2.25m, 6.75m, 20m — then the delivery is marked DEAD.
     private static final int MAX_ATTEMPTS = 6;
 
-    private WebhookPublisher webhookPublisher;
+    private final WebhookPublisher webhookPublisher;
     private final WebhookConfigRepository webhookConfigRepository;
     private final WebhookDeliveryRepository webhookDeliveryRepository;
     private final TenantRepository tenantRepository;
