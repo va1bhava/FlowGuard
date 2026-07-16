@@ -84,6 +84,20 @@ public class JwtUtil {
         }
     }
 
+    public String extractTenantIdIgnoreExpiry(String token) {
+        try {
+            return Jwts.parser()
+                    .verifyWith((SecretKey) key)
+                    .clockSkewSeconds(Long.MAX_VALUE / 1000)
+                    .build()
+                    .parseSignedClaims(token)
+                    .getPayload()
+                    .get("tenantId", String.class);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     public boolean isTokenExpired(String token) {
         return extractAllClaims(token).getExpiration().before(new Date());
     }

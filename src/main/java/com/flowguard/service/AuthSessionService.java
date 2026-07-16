@@ -19,8 +19,18 @@ public class AuthSessionService {
     private static final String TENANT_REFRESH_PREFIX = "auth:tenant_refresh:";
     private static final long REFRESH_TTL_DAYS = 7;
 
+    private static final String TENANT_SESSION_PREFIX = "auth:tenant_session:";
+
+    // Enforces single-session-per-tenant: creating a new session kills whatever
+    // session existed before it, so refresh cycles don't leave orphaned sessions
+    // sitting in Redis until their TTL happens to expire.
     public void createSession(String sessionId, String tenantId) {
+        String previousSessionId = redisTemplate.opsForValue().get(TENANT_SESSION_PREFIX + tenantId);
+        if (previousSessionId != null) {
+            redisTemplate.delete(SESSION_PREFIX + previousSessionId);
+        }
         redisTemplate.opsForValue().set(SESSION_PREFIX + sessionId, tenantId, SESSION_TTL_SECONDS, TimeUnit.SECONDS);
+        redisTemplate.opsForValue().set(TENANT_SESSION_PREFIX + tenantId, sessionId, SESSION_TTL_SECONDS, TimeUnit.SECONDS);
     }
 
     public boolean isSessionValid(String sessionId) {
@@ -32,7 +42,11 @@ public class AuthSessionService {
     }
 
     public void deleteSession(String sessionId) {
+        String tenantId = redisTemplate.opsForValue().get(SESSION_PREFIX + sessionId);
         redisTemplate.delete(SESSION_PREFIX + sessionId);
+        if (tenantId != null) {
+            redisTemplate.delete(TENANT_SESSION_PREFIX + tenantId);
+        }
     }
 
     // value stored as "tenantId:email" — same lookup key doubles as both an

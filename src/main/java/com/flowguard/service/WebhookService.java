@@ -57,7 +57,15 @@ public class WebhookService {
         webhookUrlValidator.validate(request.getUrl());
 
         Tenant tenantRef = tenantRepository.getReferenceById(tenantId);
-        String[] eventNames = Arrays.stream(request.getEvents())
+
+        // No events specified (frontend sent none, or client omitted the field
+        // entirely) -> subscribe to every event type rather than NPE-ing or
+        // silently creating a webhook that never fires.
+        WebhookEvent[] events = (request.getEvents() == null || request.getEvents().length == 0)
+                ? WebhookEvent.values()
+                : request.getEvents();
+
+        String[] eventNames = Arrays.stream(events)
                 .map(Enum::name)
                 .toArray(String[]::new);
 
