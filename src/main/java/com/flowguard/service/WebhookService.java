@@ -7,6 +7,7 @@ import com.flowguard.Entity.WebhookDelivery;
 import com.flowguard.dto.CreateWebhookRequest;
 import com.flowguard.dto.WebhookDeliveryMessage;
 import com.flowguard.dto.WebhookEvent;
+import com.flowguard.metrics.MetricsService;
 import com.flowguard.repository.TenantRepository;
 import com.flowguard.repository.WebhookConfigRepository;
 import com.flowguard.repository.WebhookDeliveryRepository;
@@ -50,6 +51,7 @@ public class WebhookService {
     private final TenantRepository tenantRepository;
     private final WebhookUrlValidator webhookUrlValidator;
     private final ObjectMapper objectMapper;
+    private final MetricsService metricsService;
 
     public WebhookConfig create(UUID tenantId, CreateWebhookRequest request) {
         // Blocks localhost/private-IP/link-local targets (incl. cloud metadata) —
@@ -152,6 +154,8 @@ public class WebhookService {
                 .payload(body)
                 .attemptCount(0)
                 .build());
+
+        metricsService.recordWebhookDispatch(eventName);
     }
 
     private String generateSecret() {

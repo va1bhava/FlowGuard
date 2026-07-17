@@ -2,6 +2,8 @@ package com.flowguard.filter;
 import com.flowguard.circuitBreaker.circuitBreakerService;
 import com.flowguard.dto.ApiKeyResolutionResult;
 import com.flowguard.exception.InvalidApiKeyException;
+import com.flowguard.metrics.MetricsService;
+import com.flowguard.properties.RateLimiterProperties;
 import com.flowguard.resolver.KeyResolver;
 import com.flowguard.service.*;
 import com.flowguard.strategy.RateLimiterStrategy;
@@ -35,6 +37,8 @@ public class RateLimiterFilter extends OncePerRequestFilter {
     private final IpRuleService ipRuleService;
     private final AbuseDetectionService abuseDetectionService;
     private final WebhookService webhookService;
+    private final MetricsService metricsService;
+    private final RateLimiterProperties rateLimiterProperties;
     @Override
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
@@ -42,7 +46,7 @@ public class RateLimiterFilter extends OncePerRequestFilter {
             throws ServletException, IOException {
         String requestPath = request.getRequestURI();
         if (requestPath.startsWith("/api/tenants") || requestPath.startsWith("/debug") || requestPath.startsWith("/flaky")
-                || requestPath.equals("/ping") || requestPath.equals("/health")) {
+                || requestPath.equals("/ping") || requestPath.equals("/health") || requestPath.startsWith("/actuator")) {
             filterChain.doFilter(request, response);
             return;
         }
@@ -69,6 +73,7 @@ public class RateLimiterFilter extends OncePerRequestFilter {
             return;
         }
         if (resolved.getTenantId() != null && ipRuleService.isBlocked(resolved.getTenantId(), clientIp)) {
+            metricsService.recordIpBlocked();
             log.warn("Blocked IP {} for tenant {}", clientIp, resolved.getTenantId());
             response.setStatus(403);
             response.setContentType("application/json");
@@ -91,6 +96,7 @@ public class RateLimiterFilter extends OncePerRequestFilter {
         int limit = resolved.getRequestsPerMinute();
         log.info("Rate limiting key: {}, limit: {}", key, limit);
         boolean allowed = strategy.isAllowed(key, limit);
+        metricsService.recordRateLimitDecision(rateLimiterProperties.getAlgorithm().name(), allowed);
 
         response.setHeader("X-RateLimit-Remaining",
                 String.valueOf(strategy.remainingLimit(key, limit)));
@@ -134,7 +140,9 @@ public class RateLimiterFilter extends OncePerRequestFilter {
         String tenantId = resolved.getTenantId().toString();
         String backendHost = resolved.getUpstreamUrl();
 
-        if (!circuitBreakerService.allowRequests(tenantId, backendHost)) {
+        boolean circuitAllowed = circuitBreakerService.allowRequests(tenantId, backendHost);
+        metricsService.recordCircuitBreakerOutcome(circuitAllowed);
+        if (!circuitAllowed) {
             log.warn("Circuit OPEN for tenant {} backend {} — short-circuiting", tenantId, backendHost);
             response.setStatus(503);
             response.setContentType("application/json");
@@ -153,6 +161,7 @@ public class RateLimiterFilter extends OncePerRequestFilter {
 
         ResponseEntity<byte[]> proxied = proxyService.forward(request, resolved.getUpstreamUrl(), requestBody);
 
+        metricsService.recordUpstreamStatus(proxied.getStatusCode().value());
         if (proxied.getStatusCode().is5xxServerError()) {
             circuitBreakerService.recordFailure(tenantId, backendHost);
         } else {

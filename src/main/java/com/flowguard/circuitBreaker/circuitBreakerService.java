@@ -1,6 +1,7 @@
 package com.flowguard.circuitBreaker;
 
 import com.flowguard.dto.WebhookEvent;
+import com.flowguard.metrics.MetricsService;
 import com.flowguard.service.WebhookService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -26,10 +27,12 @@ public class circuitBreakerService {
     private final DefaultRedisScript<String> recordSuccessScript;
     private final DefaultRedisScript<String> recordFailureScript;
     private final WebhookService webhookService;
+    private final MetricsService metricsService;
     @Autowired
-    public circuitBreakerService(StringRedisTemplate redisTemplate, WebhookService webhookService) {
+    public circuitBreakerService(StringRedisTemplate redisTemplate, WebhookService webhookService, MetricsService metricsService) {
         this.redisTemplate = redisTemplate;
         this.webhookService = webhookService;
+        this.metricsService = metricsService;
 
         this.allowRequestScript = new DefaultRedisScript<>();
         this.allowRequestScript.setLocation(new ClassPathResource("lua/allow_request.lua"));
@@ -43,11 +46,11 @@ public class circuitBreakerService {
         this.recordFailureScript.setLocation(new ClassPathResource("lua/record_failure.lua"));
         this.recordFailureScript.setResultType(String.class);
     }
-      public String buildKey(String tenantId , String backendHost){
+    public String buildKey(String tenantId , String backendHost){
         return "circuit"+tenantId+":"+backendHost;
-      }
+    }
 
-      public boolean allowRequests(String tenantId, String backendHost){
+    public boolean allowRequests(String tenantId, String backendHost){
         String key= buildKey(tenantId,backendHost);
         long now = System.currentTimeMillis();
 
@@ -59,16 +62,19 @@ public class circuitBreakerService {
                 ,String.valueOf(HALF_OPEN_MAX_TRIALS)
         );
         return "ALLOW".equals(result);
-      }
+    }
 
-      public void recordSucess(String tenantId, String backendHost) {
-          String key = buildKey(tenantId, backendHost);
+    public void recordSucess(String tenantId, String backendHost) {
+        String key = buildKey(tenantId, backendHost);
 
-          redisTemplate.execute(recordSuccessScript,
-                  Collections.singletonList(key)
-                  , String.valueOf(HALF_OPEN_MAX_TRIALS)
-          );
-      }
+        String result = redisTemplate.execute(recordSuccessScript,
+                Collections.singletonList(key)
+                , String.valueOf(HALF_OPEN_MAX_TRIALS)
+        );
+        if (result != null) {
+            metricsService.recordCircuitBreakerState(result);
+        }
+    }
     public void recordFailure(String tenantId, String backendHost) {
         String key = buildKey(tenantId, backendHost);
         long now = System.currentTimeMillis();
@@ -79,6 +85,9 @@ public class circuitBreakerService {
                 String.valueOf(FAILURE_THRESHOLD)
         );
 
+        if (result != null) {
+            metricsService.recordCircuitBreakerState(result);
+        }
         if ("OPEN".equals(result)) {
             try {
                 webhookService.dispatch(UUID.fromString(tenantId), WebhookEvent.CIRCUIT_OPEN, Map.of(

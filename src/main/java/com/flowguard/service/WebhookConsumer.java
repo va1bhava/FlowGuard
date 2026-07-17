@@ -3,6 +3,7 @@ package com.flowguard.service;
 import com.flowguard.Entity.WebhookDelivery;
 import com.flowguard.config.RabbitConfig;
 import com.flowguard.dto.WebhookDeliveryMessage;
+import com.flowguard.metrics.MetricsService;
 import com.flowguard.repository.WebhookDeliveryRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -31,6 +32,7 @@ public class WebhookConsumer {
     private final WebhookDeliveryRepository webhookDeliveryRepository;
     private final RabbitTemplate rabbitTemplate;
     private final @Qualifier("webhookRestTemplate") RestTemplate restTemplate;
+    private final MetricsService metricsService;
 
     // Rabbit hands us one message per invocation. Concurrency (how many of these
     // run in parallel) is controlled by listener container settings in application.yml,
@@ -49,6 +51,7 @@ public class WebhookConsumer {
                     new HttpEntity<>(message.getPayload(), headers), String.class);
 
             markDelivered(message.getDeliveryId());
+            metricsService.recordWebhookDeliveryOutcome(true);
             log.info("Webhook delivered for tenant {} (delivery {})", message.getTenantId(), message.getDeliveryId());
 
         } catch (Exception e) {
@@ -66,6 +69,7 @@ public class WebhookConsumer {
 
         if (attempts >= MAX_ATTEMPTS) {
             markDead(message.getDeliveryId(), e.getMessage()); // the ONLY intermediate write — happens once, ever
+            metricsService.recordWebhookDeliveryOutcome(false); // final outcome only — retries in between aren't "failures" yet
             rabbitTemplate.convertAndSend(RabbitConfig.DLX_EXCHANGE, RabbitConfig.DLQ_ROUTING_KEY, message);
             log.error("Webhook delivery DEAD for tenant {} (delivery {}) after {} attempts: {}",
                     message.getTenantId(), message.getDeliveryId(), attempts, e.getMessage());
